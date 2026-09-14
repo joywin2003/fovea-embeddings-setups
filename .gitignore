@@ -9,3 +9,4 @@ wheels/
 # Virtual environments
 .venv
 /embeddings_output/embeddings
+/embeddings_output/shards_loaded.txt

@@ -1,0 +1,99 @@
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from elasticsearch import Elasticsearch, helpers
+from tqdm import tqdm
+
+
+ES_URL = "http://localhost:9200"
+INDEX_NAME = "esci-products"
+SHARD_DIR = Path(__file__).resolve().parent / "embeddings"
+STATE_FILE = Path(__file__).resolve().parent / "shards_loaded.txt"
+EXPECTED_DIMENSIONS = 1_024
+
+
+def load_shard(
+    es: Elasticsearch, emb_path: Path, ids_path: Path
+) -> tuple[int, list[dict]]:
+    vectors = np.load(emb_path).astype(np.float32)
+    ids_df = pd.read_parquet(ids_path)
+
+    if "product_id" not in ids_df.columns:
+        raise ValueError(
+            f"Expected a product_id column in {ids_path.name}; "
+            f"found {ids_df.columns.tolist()}"
+        )
+
+    ids = ids_df["product_id"].tolist()
+    if len(vectors) != len(ids):
+        raise ValueError(
+            f"Shard mismatch in {emb_path.name}: "
+            f"{len(vectors)} vectors vs {len(ids)} IDs"
+        )
+    if vectors.ndim != 2 or vectors.shape[1] != EXPECTED_DIMENSIONS:
+        raise ValueError(
+            f"Bad dimensions in {emb_path.name}: expected (?, "
+            f"{EXPECTED_DIMENSIONS}), got {vectors.shape}"
+        )
+
+    def actions():
+        for product_id, vector in zip(ids, vectors):
+            yield {
+                "_index": INDEX_NAME,
+                "_id": str(product_id),
+                "_source": {
+                    "product_id": str(product_id),
+                    "embedding": vector.tolist(),
+                },
+            }
+
+    return helpers.bulk(
+        es.options(request_timeout=180, max_retries=3),
+        actions(),
+        chunk_size=500,
+        raise_on_error=False,
+    )
+
+
+def main() -> None:
+    es = Elasticsearch(ES_URL).options(request_timeout=120)
+    if not es.ping():
+        raise ConnectionError(f"Could not connect to Elasticsearch at {ES_URL}")
+
+    emb_files = sorted(SHARD_DIR.glob("emb_*.npy"))
+    if not emb_files:
+        raise FileNotFoundError(f"No embedding shards found in {SHARD_DIR}")
+
+    loaded_shards = (
+        set(STATE_FILE.read_text().splitlines()) if STATE_FILE.exists() else set()
+    )
+
+    for emb_path in tqdm(emb_files, desc="Loading embedding shards"):
+        shard_id = emb_path.stem.removeprefix("emb_")
+        if shard_id in loaded_shards:
+            continue
+
+        ids_path = SHARD_DIR / f"ids_{shard_id}.parquet"
+        if not ids_path.exists():
+            raise FileNotFoundError(f"Missing ID shard for {emb_path.name}: {ids_path}")
+
+        success, errors = load_shard(es, emb_path, ids_path)
+        if errors:
+            print(
+                f"Shard {shard_id}: {success} indexed, "
+                f"{len(errors)} failed; it will be retried next run"
+            )
+            print(errors[:3])
+            continue
+
+        with STATE_FILE.open("a") as state_file:
+            state_file.write(shard_id + "\n")
+        loaded_shards.add(shard_id)
+        print(f"Shard {shard_id}: {success} indexed successfully")
+
+    print("Done. Re-run this script to retry any failed shards.")
+
+
+if __name__ == "__main__":
+    main()
