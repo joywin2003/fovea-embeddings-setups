@@ -10,11 +10,37 @@ ES_URL = "http://localhost:9200"
 INDEX_NAME = "esci-products"
 SHARD_DIR = Path(__file__).resolve().parent / "embeddings"
 STATE_FILE = Path(__file__).resolve().parent / "shards_loaded.txt"
+TITLE_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "embeddings_input"
+    / "shopping_queries_dataset"
+    / "shopping_queries_dataset_products.parquet"
+)
 EXPECTED_DIMENSIONS = 1_024
 
 
+def load_titles() -> dict[str, str]:
+    if not TITLE_FILE.exists():
+        raise FileNotFoundError(f"Title dataset not found: {TITLE_FILE}")
+
+    titles_df = pd.read_parquet(TITLE_FILE)
+    if "product_id" not in titles_df.columns or "product_title" not in titles_df.columns:
+        raise ValueError(
+            f"Expected product_id and product_title columns in {TITLE_FILE}; "
+            f"found {titles_df.columns.tolist()}"
+        )
+
+    titles_df = titles_df[["product_id", "product_title"]].dropna()
+    titles_df = titles_df.drop_duplicates(subset=["product_id"])
+    return dict(
+        zip(
+            titles_df["product_id"].astype(str),
+            titles_df["product_title"].astype(str),
+        )
+)
+
 def load_shard(
-    es: Elasticsearch, emb_path: Path, ids_path: Path
+    es: Elasticsearch, emb_path: Path, ids_path: Path, titles: dict[str, str]
 ) -> tuple[int, list[dict]]:
     vectors = np.load(emb_path).astype(np.float32)
     ids_df = pd.read_parquet(ids_path)
@@ -25,7 +51,7 @@ def load_shard(
             f"found {ids_df.columns.tolist()}"
         )
 
-    ids = ids_df["product_id"].tolist()
+    ids = ids_df["product_id"].astype(str).tolist()
     if len(vectors) != len(ids):
         raise ValueError(
             f"Shard mismatch in {emb_path.name}: "
@@ -41,9 +67,10 @@ def load_shard(
         for product_id, vector in zip(ids, vectors):
             yield {
                 "_index": INDEX_NAME,
-                "_id": str(product_id),
+                "_id": product_id,
                 "_source": {
-                    "product_id": str(product_id),
+                    "product_id": product_id,
+                    "title": titles.get(product_id, ""),
                     "embedding": vector.tolist(),
                 },
             }
@@ -65,6 +92,8 @@ def main() -> None:
     if not emb_files:
         raise FileNotFoundError(f"No embedding shards found in {SHARD_DIR}")
 
+    titles = load_titles()
+    print(f"Loaded {len(titles)} titles from {TITLE_FILE}")
     loaded_shards = (
         set(STATE_FILE.read_text().splitlines()) if STATE_FILE.exists() else set()
     )
@@ -78,7 +107,7 @@ def main() -> None:
         if not ids_path.exists():
             raise FileNotFoundError(f"Missing ID shard for {emb_path.name}: {ids_path}")
 
-        success, errors = load_shard(es, emb_path, ids_path)
+        success, errors = load_shard(es, emb_path, ids_path, titles)
         if errors:
             print(
                 f"Shard {shard_id}: {success} indexed, "
@@ -92,6 +121,11 @@ def main() -> None:
         loaded_shards.add(shard_id)
         print(f"Shard {shard_id}: {success} indexed successfully")
 
+    es.indices.refresh(index=INDEX_NAME)
+    total = es.count(index=INDEX_NAME)["count"]
+    untitled = es.count(index=INDEX_NAME, query={"term": {"title": ""}})["count"]
+    print(f"\nIndexed documents: {total:,}")
+    print(f"Documents with an empty title: {untitled:,}")
     print("Done. Re-run this script to retry any failed shards.")
 
 

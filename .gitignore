@@ -9,4 +9,5 @@ wheels/
 # Virtual environments
 .venv
 /embeddings_output/embeddings
+embeddings_input/shopping_queries_dataset
 /embeddings_output/shards_loaded.txt
