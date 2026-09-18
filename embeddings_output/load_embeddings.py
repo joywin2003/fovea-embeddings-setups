@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import numpy as np
 import pandas as pd
@@ -6,7 +7,7 @@ from elasticsearch import Elasticsearch, helpers
 from tqdm import tqdm
 
 
-ES_URL = "http://localhost:9200"
+ES_URL = os.getenv("FOVEA_ES_URL", "http://localhost:9200")
 INDEX_NAME = "esci-products"
 SHARD_DIR = Path(__file__).resolve().parent / "embeddings"
 STATE_FILE = Path(__file__).resolve().parent / "shards_loaded.txt"
@@ -19,28 +20,33 @@ TITLE_FILE = (
 EXPECTED_DIMENSIONS = 1_024
 
 
-def load_titles() -> dict[str, str]:
+def load_titles() -> dict[str, dict[str, str]]:
     if not TITLE_FILE.exists():
         raise FileNotFoundError(f"Title dataset not found: {TITLE_FILE}")
 
     titles_df = pd.read_parquet(TITLE_FILE)
-    if "product_id" not in titles_df.columns or "product_title" not in titles_df.columns:
+    required = {"product_id", "product_title", "product_description"}
+    missing = sorted(required - set(titles_df.columns))
+    if missing:
         raise ValueError(
-            f"Expected product_id and product_title columns in {TITLE_FILE}; "
-            f"found {titles_df.columns.tolist()}"
+            f"Expected columns {sorted(required)} in {TITLE_FILE}; "
+            f"missing {missing}; found {titles_df.columns.tolist()}"
         )
 
-    titles_df = titles_df[["product_id", "product_title"]].dropna()
+    titles_df = titles_df[["product_id", "product_title", "product_description"]].dropna()
     titles_df = titles_df.drop_duplicates(subset=["product_id"])
-    return dict(
-        zip(
-            titles_df["product_id"].astype(str),
-            titles_df["product_title"].astype(str),
-        )
-)
+
+    result: dict[str, dict[str, str]] = {}
+    for _, row in titles_df.iterrows():
+        product_id = str(row["product_id"])
+        result[product_id] = {
+            "title": str(row["product_title"]),
+            "description": str(row["product_description"]),
+        }
+    return result
 
 def load_shard(
-    es: Elasticsearch, emb_path: Path, ids_path: Path, titles: dict[str, str]
+    es: Elasticsearch, emb_path: Path, ids_path: Path, titles: dict[str, dict[str, str]]
 ) -> tuple[int, list[dict]]:
     vectors = np.load(emb_path).astype(np.float32)
     ids_df = pd.read_parquet(ids_path)
@@ -65,12 +71,14 @@ def load_shard(
 
     def actions():
         for product_id, vector in zip(ids, vectors):
+            product_info = titles.get(product_id, {"title": "", "description": ""})
             yield {
                 "_index": INDEX_NAME,
                 "_id": product_id,
                 "_source": {
                     "product_id": product_id,
-                    "title": titles.get(product_id, ""),
+                    "title": product_info["title"],
+                    "description": product_info["description"],
                     "embedding": vector.tolist(),
                 },
             }

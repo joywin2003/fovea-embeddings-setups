@@ -43,8 +43,9 @@ The loader requires these columns:
 | --- | --- |
 | `product_id` | Unique product identifier. Used to match IDs and Elasticsearch documents. |
 | `product_title` | Product title added to the Elasticsearch document. |
+| `product_description` | Product description added to the Elasticsearch document alongside the title. |
 
-Additional columns are allowed, but the loader only uses these two columns.
+Additional columns are allowed, but the loader only uses these three columns.
 `product_id` values should be stable and should match the IDs in every embedding
 shard.
 
@@ -104,12 +105,33 @@ has explicitly been changed to support large files.
 
 ## Setup and loading
 
-Install the Python environment with `uv`, then start Elasticsearch:
+Install the Python environment:
 
 ```bash
 uv sync
+```
+
+Choose one Elasticsearch option:
+
+### Local Elasticsearch
+
+```bash
 docker compose up -d
 ```
+
+The loader uses `http://localhost:9200` by default.
+
+### Shared or remote Elasticsearch
+
+Set the endpoint before running the loader:
+
+```bash
+export FOVEA_ES_URL="http://your-shared-host:9200"
+```
+
+The remote instance must be reachable from your machine and have the required
+access configured. `FOVEA_ES_URL` only changes the connection endpoint; the
+Parquet and embedding files still stay in the paths documented above.
 
 Check the first embedding/ID pair before loading everything:
 
